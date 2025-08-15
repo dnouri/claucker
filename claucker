@@ -1,0 +1,329 @@
+#!/bin/bash
+
+IMAGE_NAME="claucker"
+CONTAINER_NAME="claucker-session"
+
+print_usage() {
+    echo "Usage: $(basename $0) [OPTIONS] [CLAUDE_CODE_ARGS]"
+    echo ""
+    echo "Options:"
+    echo "  --build           Build/rebuild the Docker image"
+    echo "  --api-key KEY     Set Anthropic API key"
+    echo "  --no-yolo         Disable --dangerously-skip-permissions (cautious mode)"
+    echo "  --no-ssh-agent    Disable SSH agent forwarding"
+    echo "  --debug           Debug mode: drop to bash shell in container"
+    echo "  --help            Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $(basename $0)                            # Run Claude Code (YOLO mode by default)"
+    echo "  $(basename $0) --no-yolo                  # Run with permission prompts"
+    echo "  $(basename $0) --api-key sk-ant-...       # Run with API key"
+    echo "  $(basename $0) --debug                    # Debug mode"
+    echo "  $(basename $0) \"Help me with this code\"   # Pass prompt to Claude Code"
+}
+
+# Function to create Dockerfile content
+create_dockerfile() {
+    cat <<'DOCKERFILE'
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    python3 \
+    python3-pip \
+    python3-venv \
+    nodejs \
+    npm \
+    ripgrep \
+    jq \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    sudo \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+# Note: sudo in container provides elevated privileges within container only,
+# not on host system due to --cap-drop ALL and namespace isolation
+RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Make /home/ubuntu world-writable so any UID can use it
+RUN chmod 777 /home/ubuntu && \
+    mkdir -p /home/ubuntu/.claude && \
+    chmod 777 /home/ubuntu/.claude
+
+USER ubuntu
+WORKDIR /workspace
+
+CMD ["claude"]
+DOCKERFILE
+}
+
+# Function to detect SSH agent socket location based on platform
+detect_ssh_agent_socket() {
+    if [ -z "$SSH_AUTH_SOCK" ]; then
+        echo ""
+        return
+    fi
+    
+    # Check the operating system
+    case "$OSTYPE" in
+        linux-gnu*)
+            # Linux: Use the standard SSH_AUTH_SOCK
+            echo "$SSH_AUTH_SOCK"
+            ;;
+        darwin*)
+            # macOS: Check for Docker Desktop's special socket
+            if [ -S "/run/host-services/ssh-auth.sock" ]; then
+                # Docker Desktop 4.24+ location
+                echo "/run/host-services/ssh-auth.sock"
+            elif [ -S "$HOME/.docker/run/host-services/ssh-auth.sock" ]; then
+                # Older Docker Desktop location
+                echo "$HOME/.docker/run/host-services/ssh-auth.sock"
+            else
+                # Fall back to standard socket (might not work with Docker Desktop)
+                echo "$SSH_AUTH_SOCK"
+            fi
+            ;;
+        msys*|cygwin*|win32)
+            # Windows/WSL: More complex, need to check if we're in WSL
+            if [ -f /proc/version ] && grep -qi microsoft /proc/version; then
+                # We're in WSL
+                echo "$SSH_AUTH_SOCK"
+            else
+                echo ""
+            fi
+            ;;
+        *)
+            # Unknown OS, try the standard socket
+            echo "$SSH_AUTH_SOCK"
+            ;;
+    esac
+}
+
+# Parse arguments
+BUILD_IMAGE=false
+DEBUG_MODE=false
+USE_YOLO=true  # Default to YOLO mode (--dangerously-skip-permissions)
+USE_SSH_AGENT=true  # Default to enabling SSH agent
+API_KEY=""
+CLAUDE_ARGS=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --build)
+            BUILD_IMAGE=true
+            shift
+            ;;
+        --api-key)
+            API_KEY="$2"
+            shift 2
+            ;;
+        --no-yolo)
+            USE_YOLO=false
+            shift
+            ;;
+        --no-ssh-agent)
+            USE_SSH_AGENT=false
+            shift
+            ;;
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
+        --help)
+            print_usage
+            exit 0
+            ;;
+        *)
+            CLAUDE_ARGS="$@"
+            break
+            ;;
+    esac
+done
+
+# Build or rebuild image if requested or if image doesn't exist
+if [ "$BUILD_IMAGE" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    echo "Building Docker image..."
+    
+    # Create temp directory for build context
+    BUILD_DIR=$(mktemp -d -t claucker-XXXXXX)
+    trap "rm -rf $BUILD_DIR" EXIT
+    
+    # Write Dockerfile to temp directory
+    create_dockerfile > "$BUILD_DIR/Dockerfile"
+    
+    # Build the image
+    docker build -t "$IMAGE_NAME" "$BUILD_DIR"
+    if [ $? -ne 0 ]; then
+        echo "Failed to build Docker image"
+        exit 1
+    fi
+    
+    echo "Docker image built successfully!"
+fi
+
+# Get project name from current directory
+PROJECT_NAME="$(basename "$(pwd)")"
+
+# Debug mode: show minimal useful info
+if [ "$DEBUG_MODE" = true ]; then
+    echo "=== Debug Mode ==="
+    echo "Project: $PROJECT_NAME"
+    echo "Host directory: $(pwd)"
+    [ -n "$ANTHROPIC_API_KEY" ] && echo "API key: Set via environment" || [ -n "$API_KEY" ] && echo "API key: Set via --api-key" || echo "API key: Not set"
+    
+    # Check SSH agent
+    if [ "$USE_SSH_AGENT" = true ]; then
+        SSH_SOCKET=$(detect_ssh_agent_socket)
+        if [ -n "$SSH_SOCKET" ]; then
+            echo "SSH agent: Available at $SSH_SOCKET"
+        else
+            echo "SSH agent: Not available"
+        fi
+    else
+        echo "SSH agent: Disabled"
+    fi
+    echo ""
+fi
+
+# Remove any existing container with same name
+docker rm -f "$CONTAINER_NAME" 2>/dev/null
+
+# Build Docker options
+DOCKER_OPTS=(
+    --name "$CONTAINER_NAME"
+    --rm
+    -it
+    --user "$(id -u):$(id -g)"
+    -v "$(pwd):/workspace/$PROJECT_NAME"
+    -w "/workspace/$PROJECT_NAME"
+    -e "HOME=/home/ubuntu"
+    -e "USER=ubuntu"
+    -e "CLAUDE_HOME=/home/ubuntu"
+    -e "CLAUDE_PROJECT_NAME=$PROJECT_NAME"
+    --security-opt "no-new-privileges"
+    --cap-drop ALL
+)
+
+# Use host network on Linux (doesn't work properly on Mac/Windows anyway)
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    DOCKER_OPTS+=(--network host)
+fi
+
+# Pass API key
+if [ -n "$API_KEY" ]; then
+    DOCKER_OPTS+=(-e "ANTHROPIC_API_KEY=$API_KEY")
+elif [ -n "$ANTHROPIC_API_KEY" ]; then
+    DOCKER_OPTS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+fi
+
+# SSH Agent Forwarding
+if [ "$USE_SSH_AGENT" = true ]; then
+    SSH_SOCKET=$(detect_ssh_agent_socket)
+    
+    if [ -n "$SSH_SOCKET" ] && [ -S "$SSH_SOCKET" ]; then
+        # Platform-specific socket mounting
+        case "$OSTYPE" in
+            darwin*)
+                # macOS: Check if using Docker Desktop special socket
+                if [[ "$SSH_SOCKET" == */host-services/ssh-auth.sock ]]; then
+                    # Docker Desktop socket - mount directly
+                    DOCKER_OPTS+=(
+                        -v "$SSH_SOCKET:/tmp/ssh-agent"
+                        -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
+                    )
+                else
+                    # Regular socket (might not work with Docker Desktop)
+                    echo "Warning: SSH agent forwarding may not work with Docker Desktop"
+                    echo "Consider upgrading Docker Desktop to 4.24+ for built-in support"
+                    DOCKER_OPTS+=(
+                        -v "$SSH_SOCKET:/tmp/ssh-agent"
+                        -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
+                    )
+                fi
+                ;;
+            linux-gnu*)
+                # Linux: Standard mounting
+                DOCKER_OPTS+=(
+                    -v "$SSH_SOCKET:/tmp/ssh-agent"
+                    -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
+                )
+                ;;
+            *)
+                # Other platforms: Attempt standard mounting
+                DOCKER_OPTS+=(
+                    -v "$SSH_SOCKET:/tmp/ssh-agent"
+                    -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
+                )
+                ;;
+        esac
+        
+        [ "$DEBUG_MODE" = false ] && echo "SSH agent forwarding enabled"
+    else
+        echo "Warning: SSH agent not available or not running"
+        echo "Git operations over SSH will not work. Start ssh-agent or use --no-ssh-agent to suppress this warning"
+    fi
+fi
+
+# Ensure .claude directory and .claude.json exist
+mkdir -p "$HOME/.claude" 2>/dev/null || true
+[ -f "$HOME/.claude.json" ] || echo "{}" > "$HOME/.claude.json"
+
+# Mount configuration directories and files
+DOCKER_OPTS+=(
+    -v "$HOME/.claude:/home/ubuntu/.claude:rw"
+    -v "$HOME/.claude.json:/home/ubuntu/.claude.json:rw"
+)
+
+# Create a temporary directory for SSH with proper permissions
+SSH_TEMP_DIR=$(mktemp -d -t claucker-ssh-XXXXXX)
+# Update trap to clean up both BUILD_DIR (if it exists) and SSH_TEMP_DIR
+trap 'rm -rf "$SSH_TEMP_DIR" ${BUILD_DIR:+"$BUILD_DIR"}' EXIT
+
+# Copy SSH config files to temp directory with correct permissions
+if [ -d "$HOME/.ssh" ]; then
+    # Create SSH directory structure with correct permissions
+    mkdir -p "$SSH_TEMP_DIR/.ssh"
+    chmod 700 "$SSH_TEMP_DIR/.ssh"
+    
+    # Copy config and known_hosts if they exist
+    [ -f "$HOME/.ssh/config" ] && cp "$HOME/.ssh/config" "$SSH_TEMP_DIR/.ssh/config" && chmod 644 "$SSH_TEMP_DIR/.ssh/config"
+    [ -f "$HOME/.ssh/known_hosts" ] && cp "$HOME/.ssh/known_hosts" "$SSH_TEMP_DIR/.ssh/known_hosts" && chmod 644 "$SSH_TEMP_DIR/.ssh/known_hosts"
+    
+    # Mount the prepared SSH directory
+    DOCKER_OPTS+=(-v "$SSH_TEMP_DIR/.ssh:/home/ubuntu/.ssh:rw")
+fi
+
+# Mount git config if it exists
+[ -f "$HOME/.gitconfig" ] && DOCKER_OPTS+=(-v "$HOME/.gitconfig:/home/ubuntu/.gitconfig:ro")
+
+# Mount project-level configuration if it exists
+[ -d "$(pwd)/.claude" ] && DOCKER_OPTS+=(-v "$(pwd)/.claude:/workspace/$PROJECT_NAME/.claude:rw")
+[ -f "$(pwd)/CLAUDE.md" ] && DOCKER_OPTS+=(-v "$(pwd)/CLAUDE.md:/workspace/$PROJECT_NAME/CLAUDE.md:ro")
+
+# Build the claude command with or without --dangerously-skip-permissions
+if [ "$USE_YOLO" = true ]; then
+    CLAUDE_CMD="claude --dangerously-skip-permissions"
+else
+    CLAUDE_CMD="claude"
+fi
+
+# Run the container
+if [ "$DEBUG_MODE" = true ]; then
+    echo "Entering debug shell. Run 'claude' to test Claude Code, 'exit' to leave."
+    if [ "$USE_YOLO" = true ]; then
+        echo "YOLO mode enabled: claude will run with --dangerously-skip-permissions"
+    fi
+    echo ""
+    exec docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" /bin/bash
+else
+    exec docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" $CLAUDE_CMD $CLAUDE_ARGS
+fi
