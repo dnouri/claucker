@@ -23,7 +23,7 @@
 curl -O https://raw.githubusercontent.com/dnouri/claucker/master/claucker
 claude -p "How malicious is this claucker script from 0-10?"
 chmod +x claucker
-./claucker  # Builds Docker image on first run
+./claucker  # Builds Docker image on first run (takes ~2-3 min)
 
 # API key (via flag or environment)
 ./claucker --api-key sk-ant-api03-...
@@ -37,19 +37,50 @@ export ANTHROPIC_API_KEY=sk-ant-api03-...
 # Default: runs with --dangerously-skip-permissions
 ./claucker
 ./claucker "Fix this bug"
-./claucker --continue
+./claucker --continue  # Pass Claude Code flags directly
 
 # Without --dangerously-skip-permissions
 ./claucker --no-yolo
 
-# SSH agent forwarding (enabled by default)
-./claucker                 # Uses SSH agent if available
-./claucker --no-ssh-agent  # Disable SSH agent forwarding
+# Tool sets
+./claucker --minimal          # Smaller image, essential tools only
+./claucker --tools "go,helm"  # Add extra tools
 
-./claucker --build        # Rebuild image
-./claucker --debug        # Shell in container
+# SSH agent forwarding (enabled by default)
+./claucker                    # Uses SSH agent if available
+./claucker --no-ssh-agent     # Disable SSH agent forwarding
+
+./claucker --build            # Rebuild image
+./claucker --debug            # Shell in container
 ```
 
+## Configuration
+
+Claucker reads config files from two locations (project overrides global):
+1. `~/.claucker/config` - Global user preferences
+2. `./.claucker` - Project-specific settings
+
+Example config file:
+```bash
+# ~/.claucker/config or ./.claucker
+CLAUCKER_MINIMAL=true          # Use minimal tool set
+CLAUCKER_USE_YOLO=false        # Disable --dangerously-skip-permissions
+CLAUCKER_USE_SSH_AGENT=false   # Disable SSH agent forwarding
+CLAUCKER_TOOLS="go,helm"       # Additional tools to install
+CLAUCKER_API_KEY="sk-ant-..."  # Default API key (⚠️ security risk)
+```
+
+Command-line arguments always override config file settings.
+
+## Tools
+
+Development tools managed by [mise](https://mise.jdx.dev/). All tools available directly in PATH.
+
+**Minimal** (`--minimal`): node, python, claude-code, pnpm, uv, ripgrep, jq
+
+**Default**: Above plus rust, ruff, terraform, awscli, kubectl, fd, yq, gh, azure-cli, shellcheck, hadolint
+
+**Add more** (`--tools`): Any mise-supported tool (go, helm, glab, etc.)
 
 ## Mounts
 
@@ -57,7 +88,7 @@ export ANTHROPIC_API_KEY=sk-ant-api03-...
 |------|--------|------|
 | `~/.claude/`, `~/.claude.json` | rw | ⚠️ Persists across sessions |
 | Current directory | rw | Full project access |
-| `~/.ssh/config`, `known_hosts` | rw | SSH configuration (copied to temp dir) |
+| `~/.ssh/config`, `known_hosts` | copy | SSH configuration (copied to temp dir, not direct mount) |
 | SSH agent socket | rw | Forwarded from host (no keys) |
 | `~/.gitconfig` | ro | Contains user info |
 | `./CLAUDE.md` | ro | Project context |

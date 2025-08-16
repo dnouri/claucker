@@ -1,63 +1,199 @@
 #!/bin/bash
 
+VERSION="2025-08-17"
 IMAGE_NAME="claucker"
 CONTAINER_NAME="claucker-session"
 
+# Cleanup function for trap
+cleanup() {
+    [ -n "$BUILD_DIR" ] && [ -d "$BUILD_DIR" ] && rm -rf "$BUILD_DIR"
+    [ -n "$SSH_TEMP_DIR" ] && [ -d "$SSH_TEMP_DIR" ] && rm -rf "$SSH_TEMP_DIR"
+}
+trap cleanup EXIT
+
 print_usage() {
-    echo "Usage: $(basename $0) [OPTIONS] [CLAUDE_CODE_ARGS]"
+    echo "Usage: $(basename "$0") [OPTIONS] [CLAUDE_CODE_ARGS]"
     echo ""
     echo "Options:"
     echo "  --build           Build/rebuild the Docker image"
     echo "  --api-key KEY     Set Anthropic API key"
+    echo "  --minimal         Use minimal tool set (faster, smaller image)"
+    echo "  --tools TOOLS     Install additional tools (comma-separated, e.g., 'go,glab')"
     echo "  --no-yolo         Disable --dangerously-skip-permissions (cautious mode)"
     echo "  --no-ssh-agent    Disable SSH agent forwarding"
     echo "  --debug           Debug mode: drop to bash shell in container"
     echo "  --help            Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $(basename $0)                            # Run Claude Code (YOLO mode by default)"
-    echo "  $(basename $0) --no-yolo                  # Run with permission prompts"
-    echo "  $(basename $0) --api-key sk-ant-...       # Run with API key"
-    echo "  $(basename $0) --debug                    # Debug mode"
-    echo "  $(basename $0) \"Help me with this code\"   # Pass prompt to Claude Code"
+    echo "  $(basename "$0")                            # Run Claude Code (YOLO mode by default)"
+    echo "  $(basename "$0") --minimal                  # Run with minimal tools only"
+    echo "  $(basename "$0") --tools \"go,glab\"          # Add Go and GitLab CLI"
+    echo "  $(basename "$0") --no-yolo                  # Run with permission prompts"
+    echo "  $(basename "$0") --api-key sk-ant-...       # Run with API key"
+    echo "  $(basename "$0") --debug                    # Debug mode"
+    echo "  $(basename "$0") \"Help me with this code\"   # Pass prompt to Claude Code"
 }
 
 # Function to create Dockerfile content
 create_dockerfile() {
+    local minimal_mode="${1:-false}"
+    local extra_tools="${2:-}"
+    
     cat <<'DOCKERFILE'
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
+# Layer 1: System dependencies (rarely changes)
 RUN apt-get update && apt-get install -y \
     curl \
+    wget \
     git \
+    make \
     build-essential \
-    python3 \
-    python3-pip \
-    python3-venv \
-    nodejs \
-    npm \
-    ripgrep \
-    jq \
     ca-certificates \
     gnupg \
-    lsb-release \
-    sudo \
     openssh-client \
+    sudo \
+    # Playwright dependencies for headless browsers (Ubuntu 24.04)
+    libglib2.0-0t64 \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0t64 \
+    libatk-bridge2.0-0t64 \
+    libcups2t64 \
+    libdrm2 \
+    libdbus-1-3 \
+    libatspi2.0-0t64 \
+    libx11-6 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libxcb1 \
+    libxkbcommon0 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2t64 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+# Layer 2: Install mise (changes occasionally)
+ENV MISE_DATA_DIR="/mise"
+ENV MISE_CONFIG_DIR="/mise"
+ENV MISE_CACHE_DIR="/mise/cache"
+ENV MISE_FETCH_REMOTE_VERSIONS_TIMEOUT=20
+ENV PATH="/mise/shims:/usr/local/bin:$PATH"
+ENV MISE_PYTHON_COMPILE=false
+# Set Rust installation paths to be accessible by all users
+ENV CARGO_HOME="/opt/cargo"
+ENV RUSTUP_HOME="/opt/rustup"
+ENV PATH="$CARGO_HOME/bin:$PATH"
+ARG GITHUB_TOKEN
+ENV GITHUB_TOKEN=$GITHUB_TOKEN
+
+RUN curl -fsSL https://mise.run | sh && \
+    mv /root/.local/bin/mise /usr/local/bin && \
+    echo 'eval "$(mise activate bash)"' >> /etc/bash.bashrc && \
+    /usr/local/bin/mise settings set python.compile false && \
+    /usr/local/bin/mise --version && \
+    mkdir -p /opt/cargo /opt/rustup && \
+    chmod -R 755 /opt/cargo /opt/rustup
+
+# Layer 3: Core tools - minimal or recommended based on flag
+DOCKERFILE
+
+    # Add the appropriate mise configuration based on mode
+    if [ "$minimal_mode" = "true" ]; then
+        cat <<'DOCKERFILE'
+# Minimal tools installation
+RUN /usr/local/bin/mise use -g \
+    node@22 \
+    python@3.13 \
+    "npm:@anthropic-ai/claude-code" \
+    pnpm \
+    uv \
+    ripgrep \
+    jq && \
+    /usr/local/bin/mise install
+DOCKERFILE
+    else
+        cat <<'DOCKERFILE'
+# Recommended tools installation - base runtimes
+RUN /usr/local/bin/mise use -g \
+    node@22 \
+    python@3.13 \
+    rust \
+    "npm:@anthropic-ai/claude-code" \
+    pnpm && \
+    /usr/local/bin/mise install
+
+# Python tools
+RUN /usr/local/bin/mise use -g \
+    uv \
+    ruff && \
+    /usr/local/bin/mise install
+
+# CLI utilities
+RUN /usr/local/bin/mise use -g \
+    ripgrep \
+    fd \
+    jq \
+    yq && \
+    /usr/local/bin/mise install
+
+# Cloud/Infrastructure tools
+RUN /usr/local/bin/mise use -g \
+    gh \
+    terraform \
+    kubectl \
+    awscli \
+    azure-cli && \
+    /usr/local/bin/mise install
+
+# Code quality tools
+RUN /usr/local/bin/mise use -g \
+    shellcheck \
+    hadolint && \
+    /usr/local/bin/mise install
+DOCKERFILE
+    fi
+
+    # Layer 4: Extra tools (if specified)
+    if [ -n "$extra_tools" ]; then
+        cat <<DOCKERFILE
+
+# Layer 4: User-specified additional tools
+RUN for tool in ${extra_tools//,/ }; do \
+        /usr/local/bin/mise use -g \$tool; \
+    done && \
+    /usr/local/bin/mise install
+DOCKERFILE
+    fi
+
+    # Continue with the rest of the Dockerfile
+    cat <<'DOCKERFILE'
 
 # Note: sudo in container provides elevated privileges within container only,
 # not on host system due to --cap-drop ALL and namespace isolation
 RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+# Fix permissions for pnpm (mise installs it with restrictive 711 permissions)
+RUN if [ -d /mise/installs/pnpm ]; then chmod -R 755 /mise/installs/pnpm/; fi
+
+# Trust the mise.toml file in root that gets created for Python dependencies
+RUN if [ -f /mise.toml ]; then /usr/local/bin/mise trust /mise.toml; fi
+
 # Make /home/ubuntu world-writable so any UID can use it
 RUN chmod 777 /home/ubuntu && \
     mkdir -p /home/ubuntu/.claude && \
     chmod 777 /home/ubuntu/.claude
+
+# Ensure mise tools are available in PATH for all shells
+ENV BASH_ENV=/etc/bash.bashrc
+ENV PATH="/mise/shims:/home/ubuntu/.local/bin:$PATH"
 
 USER ubuntu
 WORKDIR /workspace
@@ -93,8 +229,8 @@ detect_ssh_agent_socket() {
             fi
             ;;
         msys*|cygwin*|win32)
-            # Windows/WSL: More complex, need to check if we're in WSL
-            if [ -f /proc/version ] && grep -qi microsoft /proc/version; then
+            # Windows/WSL: Check for WSL environment variables
+            if [ -n "$WSL_DISTRO_NAME" ] || [ -n "$WSL_INTEROP" ]; then
                 # We're in WSL
                 echo "$SSH_AUTH_SOCK"
             else
@@ -108,13 +244,19 @@ detect_ssh_agent_socket() {
     esac
 }
 
-# Parse arguments
+# Load config files (project overrides global)
+[ -f "$HOME/.claucker/config" ] && source "$HOME/.claucker/config"
+[ -f "./.claucker" ] && source "./.claucker"
+
+# Parse arguments (command line overrides config files)
 BUILD_IMAGE=false
 DEBUG_MODE=false
-USE_YOLO=true  # Default to YOLO mode (--dangerously-skip-permissions)
-USE_SSH_AGENT=true  # Default to enabling SSH agent
-API_KEY=""
-CLAUDE_ARGS=""
+USE_YOLO="${CLAUCKER_USE_YOLO:-true}"  # Default to YOLO mode
+USE_SSH_AGENT="${CLAUCKER_USE_SSH_AGENT:-true}"  # Default to enabling SSH agent
+MINIMAL_MODE="${CLAUCKER_MINIMAL:-false}"  # Default to recommended tools
+EXTRA_TOOLS="${CLAUCKER_TOOLS:-}"  # Additional tools to install
+API_KEY="${CLAUCKER_API_KEY:-}"
+CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -124,6 +266,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --api-key)
             API_KEY="$2"
+            shift 2
+            ;;
+        --minimal)
+            MINIMAL_MODE=true
+            shift
+            ;;
+        --tools)
+            EXTRA_TOOLS="$2"
             shift 2
             ;;
         --no-yolo)
@@ -142,8 +292,12 @@ while [[ $# -gt 0 ]]; do
             print_usage
             exit 0
             ;;
+        --version)
+            echo "claucker version $VERSION"
+            exit 0
+            ;;
         *)
-            CLAUDE_ARGS="$@"
+            CLAUDE_ARGS=("$@")
             break
             ;;
     esac
@@ -155,16 +309,21 @@ if [ "$BUILD_IMAGE" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null
     
     # Create temp directory for build context
     BUILD_DIR=$(mktemp -d -t claucker-XXXXXX)
-    trap "rm -rf $BUILD_DIR" EXIT
     
     # Write Dockerfile to temp directory
-    create_dockerfile > "$BUILD_DIR/Dockerfile"
+    create_dockerfile "$MINIMAL_MODE" "$EXTRA_TOOLS" > "$BUILD_DIR/Dockerfile"
     
-    # Build the image
-    docker build -t "$IMAGE_NAME" "$BUILD_DIR"
-    if [ $? -ne 0 ]; then
-        echo "Failed to build Docker image"
-        exit 1
+    # Build the image (pass GitHub token if available for rate limits)
+    if [ -n "$GITHUB_TOKEN" ]; then
+        if ! docker build --build-arg GITHUB_TOKEN="$GITHUB_TOKEN" -t "$IMAGE_NAME" "$BUILD_DIR"; then
+            echo "Failed to build Docker image"
+            exit 1
+        fi
+    else
+        if ! docker build -t "$IMAGE_NAME" "$BUILD_DIR"; then
+            echo "Failed to build Docker image"
+            exit 1
+        fi
     fi
     
     echo "Docker image built successfully!"
@@ -209,7 +368,6 @@ DOCKER_OPTS=(
     -e "USER=ubuntu"
     -e "CLAUDE_HOME=/home/ubuntu"
     -e "CLAUDE_PROJECT_NAME=$PROJECT_NAME"
-    --security-opt "no-new-privileges"
     --cap-drop ALL
 )
 
@@ -285,8 +443,6 @@ DOCKER_OPTS+=(
 
 # Create a temporary directory for SSH with proper permissions
 SSH_TEMP_DIR=$(mktemp -d -t claucker-ssh-XXXXXX)
-# Update trap to clean up both BUILD_DIR (if it exists) and SSH_TEMP_DIR
-trap 'rm -rf "$SSH_TEMP_DIR" ${BUILD_DIR:+"$BUILD_DIR"}' EXIT
 
 # Copy SSH config files to temp directory with correct permissions
 if [ -d "$HOME/.ssh" ]; then
@@ -295,8 +451,14 @@ if [ -d "$HOME/.ssh" ]; then
     chmod 700 "$SSH_TEMP_DIR/.ssh"
     
     # Copy config and known_hosts if they exist
-    [ -f "$HOME/.ssh/config" ] && cp "$HOME/.ssh/config" "$SSH_TEMP_DIR/.ssh/config" && chmod 644 "$SSH_TEMP_DIR/.ssh/config"
-    [ -f "$HOME/.ssh/known_hosts" ] && cp "$HOME/.ssh/known_hosts" "$SSH_TEMP_DIR/.ssh/known_hosts" && chmod 644 "$SSH_TEMP_DIR/.ssh/known_hosts"
+    if [ -f "$HOME/.ssh/config" ]; then
+        cp "$HOME/.ssh/config" "$SSH_TEMP_DIR/.ssh/config"
+        chmod 644 "$SSH_TEMP_DIR/.ssh/config"
+    fi
+    if [ -f "$HOME/.ssh/known_hosts" ]; then
+        cp "$HOME/.ssh/known_hosts" "$SSH_TEMP_DIR/.ssh/known_hosts"
+        chmod 644 "$SSH_TEMP_DIR/.ssh/known_hosts"
+    fi
     
     # Mount the prepared SSH directory
     DOCKER_OPTS+=(-v "$SSH_TEMP_DIR/.ssh:/home/ubuntu/.ssh:rw")
@@ -323,7 +485,7 @@ if [ "$DEBUG_MODE" = true ]; then
         echo "YOLO mode enabled: claude will run with --dangerously-skip-permissions"
     fi
     echo ""
-    exec docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" /bin/bash
+    docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" /bin/bash
 else
-    exec docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" $CLAUDE_CMD $CLAUDE_ARGS
+    docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" $CLAUDE_CMD "${CLAUDE_ARGS[@]}"
 fi
