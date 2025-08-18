@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="2025-08-18.2"
+VERSION="2025-08-19"
 IMAGE_NAME="claucker"
 
 # Cleanup function for trap
@@ -380,6 +380,27 @@ if [ -n "$API_KEY" ]; then
     DOCKER_OPTS+=(-e "ANTHROPIC_API_KEY=$API_KEY")
 elif [ -n "$ANTHROPIC_API_KEY" ]; then
     DOCKER_OPTS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+fi
+
+# Extract Git configuration for proper commit attribution
+GIT_USER_NAME=$(git config user.name 2>/dev/null || echo "${USER:-$(whoami)}")
+GIT_USER_EMAIL=$(git config user.email 2>/dev/null || true)
+
+# Pass Git author information to container
+if [ -n "$GIT_USER_NAME" ]; then
+    DOCKER_OPTS+=(
+        -e "GIT_AUTHOR_NAME=$GIT_USER_NAME"
+        -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
+    )
+fi
+
+if [ -n "$GIT_USER_EMAIL" ]; then
+    DOCKER_OPTS+=(
+        -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
+        -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
+    )
+else
+    echo "Warning: Git user.email not configured. Commits may not have proper attribution."
 fi
 
 # SSH Agent Forwarding
