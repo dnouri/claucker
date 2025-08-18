@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="2025-08-17"
+VERSION="2025-08-18"
 IMAGE_NAME="claucker"
 CONTAINER_NAME="claucker-session"
 
@@ -98,6 +98,7 @@ RUN curl -fsSL https://mise.run | sh && \
     mv /root/.local/bin/mise /usr/local/bin && \
     echo 'eval "$(mise activate bash)"' >> /etc/bash.bashrc && \
     /usr/local/bin/mise settings set python.compile false && \
+    /usr/local/bin/mise settings set trusted_config_paths '/' && \
     /usr/local/bin/mise --version && \
     mkdir -p /opt/cargo /opt/rustup && \
     chmod -R 755 /opt/cargo /opt/rustup
@@ -182,9 +183,6 @@ RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Fix permissions for pnpm (mise installs it with restrictive 711 permissions)
 RUN if [ -d /mise/installs/pnpm ]; then chmod -R 755 /mise/installs/pnpm/; fi
-
-# Trust the mise.toml file in root that gets created for Python dependencies
-RUN if [ -f /mise.toml ]; then /usr/local/bin/mise trust /mise.toml; fi
 
 # Make /home/ubuntu world-writable so any UID can use it
 RUN chmod 777 /home/ubuntu && \
