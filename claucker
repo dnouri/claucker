@@ -1,8 +1,7 @@
 #!/bin/bash
 
-VERSION="2025-08-18"
+VERSION="2025-08-18.2"
 IMAGE_NAME="claucker"
-CONTAINER_NAME="claucker-session"
 
 # Cleanup function for trap
 cleanup() {
@@ -330,9 +329,14 @@ fi
 # Get project name from current directory
 PROJECT_NAME="$(basename "$(pwd)")"
 
+# Generate unique container name with timestamp
+TIMESTAMP=$(date +%s)
+CONTAINER_NAME="claucker-${PROJECT_NAME}-${TIMESTAMP}"
+
 # Debug mode: show minimal useful info
 if [ "$DEBUG_MODE" = true ]; then
     echo "=== Debug Mode ==="
+    echo "Container: $CONTAINER_NAME"
     echo "Project: $PROJECT_NAME"
     echo "Host directory: $(pwd)"
     [ -n "$ANTHROPIC_API_KEY" ] && echo "API key: Set via environment" || [ -n "$API_KEY" ] && echo "API key: Set via --api-key" || echo "API key: Not set"
@@ -350,9 +354,6 @@ if [ "$DEBUG_MODE" = true ]; then
     fi
     echo ""
 fi
-
-# Remove any existing container with same name
-docker rm -f "$CONTAINER_NAME" 2>/dev/null
 
 # Build Docker options
 DOCKER_OPTS=(
