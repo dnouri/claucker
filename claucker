@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="2025-08-19"
+VERSION="2025-08-19.2"
 IMAGE_NAME="claucker"
 
 # Cleanup function for trap
@@ -14,7 +14,7 @@ print_usage() {
     echo "Usage: $(basename "$0") [OPTIONS] [CLAUDE_CODE_ARGS]"
     echo ""
     echo "Options:"
-    echo "  --build           Build/rebuild the Docker image"
+    echo "  --build           Force complete rebuild of Docker image (--no-cache)"
     echo "  --api-key KEY     Set Anthropic API key"
     echo "  --minimal         Use minimal tool set (faster, smaller image)"
     echo "  --tools TOOLS     Install additional tools (comma-separated, e.g., 'go,glab')"
@@ -300,6 +300,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Force rebuild with --no-cache when --build flag is used
+# This ensures fresh tools and clean environment
+DOCKER_BUILD_OPTS=""
+if [ "$BUILD_IMAGE" = true ]; then
+    DOCKER_BUILD_OPTS="--no-cache"
+    echo "Forcing complete image rebuild with --no-cache for fresh environment..."
+fi
+
 # Build or rebuild image if requested or if image doesn't exist
 if [ "$BUILD_IMAGE" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo "Building Docker image..."
@@ -312,12 +320,12 @@ if [ "$BUILD_IMAGE" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null
     
     # Build the image (pass GitHub token if available for rate limits)
     if [ -n "$GITHUB_TOKEN" ]; then
-        if ! docker build --build-arg GITHUB_TOKEN="$GITHUB_TOKEN" -t "$IMAGE_NAME" "$BUILD_DIR"; then
+        if ! docker build $DOCKER_BUILD_OPTS --build-arg GITHUB_TOKEN="$GITHUB_TOKEN" -t "$IMAGE_NAME" "$BUILD_DIR"; then
             echo "Failed to build Docker image"
             exit 1
         fi
     else
-        if ! docker build -t "$IMAGE_NAME" "$BUILD_DIR"; then
+        if ! docker build $DOCKER_BUILD_OPTS -t "$IMAGE_NAME" "$BUILD_DIR"; then
             echo "Failed to build Docker image"
             exit 1
         fi
