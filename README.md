@@ -2,6 +2,8 @@
 
 *Containerized YOLO for Claude Code*
 
+![Claucker Demo - Animated terminal showing containerized Claude Code with Docker isolation](vhs-demo/demo.gif)
+
 ## Why?
 
 `--dangerously-skip-permissions` on your host is dangerous. This runs it in a container instead.
