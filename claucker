@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="2025-08-19.2"
+VERSION="2025-08-21"
 IMAGE_NAME="claucker"
 
 # Cleanup function for trap
@@ -363,18 +363,22 @@ if [ "$DEBUG_MODE" = true ]; then
     echo ""
 fi
 
+# Get the current host path for mounting
+HOST_PATH="$(pwd)"
+
 # Build Docker options
 DOCKER_OPTS=(
     --name "$CONTAINER_NAME"
     --rm
     -it
     --user "$(id -u):$(id -g)"
-    -v "$(pwd):/workspace/$PROJECT_NAME"
-    -w "/workspace/$PROJECT_NAME"
+    -v "$HOST_PATH:$HOST_PATH:rw"
+    -w "$HOST_PATH"
     -e "HOME=/home/ubuntu"
     -e "USER=ubuntu"
     -e "CLAUDE_HOME=/home/ubuntu"
     -e "CLAUDE_PROJECT_NAME=$PROJECT_NAME"
+    -e "CLAUDE_HOST_PATH=$HOST_PATH"  # Pass original path for reference
     --cap-drop ALL
 )
 
@@ -495,10 +499,6 @@ fi
 # Mount git config if it exists
 [ -f "$HOME/.gitconfig" ] && DOCKER_OPTS+=(-v "$HOME/.gitconfig:/home/ubuntu/.gitconfig:ro")
 
-# Mount project-level configuration if it exists
-[ -d "$(pwd)/.claude" ] && DOCKER_OPTS+=(-v "$(pwd)/.claude:/workspace/$PROJECT_NAME/.claude:rw")
-[ -f "$(pwd)/CLAUDE.md" ] && DOCKER_OPTS+=(-v "$(pwd)/CLAUDE.md:/workspace/$PROJECT_NAME/CLAUDE.md:ro")
-
 # Build the claude command with or without --dangerously-skip-permissions
 if [ "$USE_YOLO" = true ]; then
     CLAUDE_CMD="claude --dangerously-skip-permissions"
@@ -513,7 +513,9 @@ if [ "$DEBUG_MODE" = true ]; then
         echo "YOLO mode enabled: claude will run with --dangerously-skip-permissions"
     fi
     echo ""
-    docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" /bin/bash
+    # Create parent directories and enter bash
+    docker run "${DOCKER_OPTS[@]}" --entrypoint /bin/bash "$IMAGE_NAME" -c "mkdir -p '$(dirname "$HOST_PATH")' 2>/dev/null; exec /bin/bash"
 else
-    docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME" $CLAUDE_CMD "${CLAUDE_ARGS[@]}"
+    # Create parent directories and run Claude
+    docker run "${DOCKER_OPTS[@]}" --entrypoint /bin/bash "$IMAGE_NAME" -c "mkdir -p '$(dirname "$HOST_PATH")' 2>/dev/null; exec $CLAUDE_CMD ${CLAUDE_ARGS[@]}"
 fi
