@@ -12,7 +12,6 @@
 
 ## Security Design
 
-- **SSH**: Uses SSH agent forwarding - no keys are mounted, only agent socket. Mounts `config` and `known_hosts` for host verification
 - **Network**: ⚠️ **No isolation** - uses host networking on Linux, Claude can reach ANY internet endpoint
 - **Filesystem**: Only sees explicitly mounted paths
 - **Persistence**: `~/.claude/` has write access (required for functionality) - changes persist
@@ -48,10 +47,6 @@ export ANTHROPIC_API_KEY=sk-ant-api03-...
 ./claucker --minimal          # Smaller image, essential tools only
 ./claucker --tools "go,helm"  # Add extra tools
 
-# SSH agent forwarding (enabled by default)
-./claucker                    # Uses SSH agent if available
-./claucker --no-ssh-agent     # Disable SSH agent forwarding
-
 ./claucker --build            # Rebuild image
 ./claucker --debug            # Shell in container
 ```
@@ -67,7 +62,6 @@ Example config file:
 # ~/.claucker/config or ./.claucker
 CLAUCKER_MINIMAL=true          # Use minimal tool set
 CLAUCKER_USE_YOLO=false        # Disable --dangerously-skip-permissions
-CLAUCKER_USE_SSH_AGENT=false   # Disable SSH agent forwarding
 CLAUCKER_TOOLS="go,helm"       # Additional tools to install
 CLAUCKER_API_KEY="sk-ant-..."  # Default API key (⚠️ security risk)
 ```
@@ -90,8 +84,6 @@ Development tools managed by [mise](https://mise.jdx.dev/). All tools available 
 |------|--------|------|
 | `~/.claude/`, `~/.claude.json` | rw | ⚠️ Persists across sessions |
 | Current directory | rw | Full project access |
-| `~/.ssh/config`, `known_hosts` | copy | SSH configuration (copied to temp dir, not direct mount) |
-| SSH agent socket | rw | Forwarded from host (no keys) |
 | `~/.gitconfig` | ro | Contains user info |
 | `./CLAUDE.md` | ro | Project context |
 
@@ -100,13 +92,12 @@ Development tools managed by [mise](https://mise.jdx.dev/). All tools available 
 - Docker installed and running
 - Linux or macOS (Windows via WSL2)
 - Bash shell
-- SSH agent running (optional, required only for Git operations over SSH)
 
 ## Limitations
 
 - **No network isolation**: Claude can exfiltrate to ANY internet endpoint (unlike Anthropic's devcontainer)
+- **No SSH agent**: Git operations over SSH require HTTPS with tokens instead
 - Git config exposed (read-only, contains user.email)
-- SSH directory mounted with write access, SSH agent socket exposed
 - Full project directory mounted with read-write access
 - API key visible to Claude as environment variable
 - Basic Docker isolation, not a security sandbox

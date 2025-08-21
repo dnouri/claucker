@@ -1,12 +1,11 @@
 #!/bin/bash
 
-VERSION="2025-08-21"
+VERSION="2025-08-21.2"
 IMAGE_NAME="claucker"
 
 # Cleanup function for trap
 cleanup() {
     [ -n "$BUILD_DIR" ] && [ -d "$BUILD_DIR" ] && rm -rf "$BUILD_DIR"
-    [ -n "$SSH_TEMP_DIR" ] && [ -d "$SSH_TEMP_DIR" ] && rm -rf "$SSH_TEMP_DIR"
 }
 trap cleanup EXIT
 
@@ -19,7 +18,6 @@ print_usage() {
     echo "  --minimal         Use minimal tool set (faster, smaller image)"
     echo "  --tools TOOLS     Install additional tools (comma-separated, e.g., 'go,glab')"
     echo "  --no-yolo         Disable --dangerously-skip-permissions (cautious mode)"
-    echo "  --no-ssh-agent    Disable SSH agent forwarding"
     echo "  --debug           Debug mode: drop to bash shell in container"
     echo "  --help            Show this help message"
     echo ""
@@ -199,48 +197,6 @@ CMD ["claude"]
 DOCKERFILE
 }
 
-# Function to detect SSH agent socket location based on platform
-detect_ssh_agent_socket() {
-    if [ -z "$SSH_AUTH_SOCK" ]; then
-        echo ""
-        return
-    fi
-    
-    # Check the operating system
-    case "$OSTYPE" in
-        linux-gnu*)
-            # Linux: Use the standard SSH_AUTH_SOCK
-            echo "$SSH_AUTH_SOCK"
-            ;;
-        darwin*)
-            # macOS: Check for Docker Desktop's special socket
-            if [ -S "/run/host-services/ssh-auth.sock" ]; then
-                # Docker Desktop 4.24+ location
-                echo "/run/host-services/ssh-auth.sock"
-            elif [ -S "$HOME/.docker/run/host-services/ssh-auth.sock" ]; then
-                # Older Docker Desktop location
-                echo "$HOME/.docker/run/host-services/ssh-auth.sock"
-            else
-                # Fall back to standard socket (might not work with Docker Desktop)
-                echo "$SSH_AUTH_SOCK"
-            fi
-            ;;
-        msys*|cygwin*|win32)
-            # Windows/WSL: Check for WSL environment variables
-            if [ -n "$WSL_DISTRO_NAME" ] || [ -n "$WSL_INTEROP" ]; then
-                # We're in WSL
-                echo "$SSH_AUTH_SOCK"
-            else
-                echo ""
-            fi
-            ;;
-        *)
-            # Unknown OS, try the standard socket
-            echo "$SSH_AUTH_SOCK"
-            ;;
-    esac
-}
-
 # Load config files (project overrides global)
 [ -f "$HOME/.claucker/config" ] && source "$HOME/.claucker/config"
 [ -f "./.claucker" ] && source "./.claucker"
@@ -249,7 +205,6 @@ detect_ssh_agent_socket() {
 BUILD_IMAGE=false
 DEBUG_MODE=false
 USE_YOLO="${CLAUCKER_USE_YOLO:-true}"  # Default to YOLO mode
-USE_SSH_AGENT="${CLAUCKER_USE_SSH_AGENT:-true}"  # Default to enabling SSH agent
 MINIMAL_MODE="${CLAUCKER_MINIMAL:-false}"  # Default to recommended tools
 EXTRA_TOOLS="${CLAUCKER_TOOLS:-}"  # Additional tools to install
 API_KEY="${CLAUCKER_API_KEY:-}"
@@ -275,10 +230,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-yolo)
             USE_YOLO=false
-            shift
-            ;;
-        --no-ssh-agent)
-            USE_SSH_AGENT=false
             shift
             ;;
         --debug)
@@ -348,18 +299,6 @@ if [ "$DEBUG_MODE" = true ]; then
     echo "Project: $PROJECT_NAME"
     echo "Host directory: $(pwd)"
     [ -n "$ANTHROPIC_API_KEY" ] && echo "API key: Set via environment" || [ -n "$API_KEY" ] && echo "API key: Set via --api-key" || echo "API key: Not set"
-    
-    # Check SSH agent
-    if [ "$USE_SSH_AGENT" = true ]; then
-        SSH_SOCKET=$(detect_ssh_agent_socket)
-        if [ -n "$SSH_SOCKET" ]; then
-            echo "SSH agent: Available at $SSH_SOCKET"
-        else
-            echo "SSH agent: Not available"
-        fi
-    else
-        echo "SSH agent: Disabled"
-    fi
     echo ""
 fi
 
@@ -415,54 +354,6 @@ else
     echo "Warning: Git user.email not configured. Commits may not have proper attribution."
 fi
 
-# SSH Agent Forwarding
-if [ "$USE_SSH_AGENT" = true ]; then
-    SSH_SOCKET=$(detect_ssh_agent_socket)
-    
-    if [ -n "$SSH_SOCKET" ] && [ -S "$SSH_SOCKET" ]; then
-        # Platform-specific socket mounting
-        case "$OSTYPE" in
-            darwin*)
-                # macOS: Check if using Docker Desktop special socket
-                if [[ "$SSH_SOCKET" == */host-services/ssh-auth.sock ]]; then
-                    # Docker Desktop socket - mount directly
-                    DOCKER_OPTS+=(
-                        -v "$SSH_SOCKET:/tmp/ssh-agent"
-                        -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
-                    )
-                else
-                    # Regular socket (might not work with Docker Desktop)
-                    echo "Warning: SSH agent forwarding may not work with Docker Desktop"
-                    echo "Consider upgrading Docker Desktop to 4.24+ for built-in support"
-                    DOCKER_OPTS+=(
-                        -v "$SSH_SOCKET:/tmp/ssh-agent"
-                        -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
-                    )
-                fi
-                ;;
-            linux-gnu*)
-                # Linux: Standard mounting
-                DOCKER_OPTS+=(
-                    -v "$SSH_SOCKET:/tmp/ssh-agent"
-                    -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
-                )
-                ;;
-            *)
-                # Other platforms: Attempt standard mounting
-                DOCKER_OPTS+=(
-                    -v "$SSH_SOCKET:/tmp/ssh-agent"
-                    -e "SSH_AUTH_SOCK=/tmp/ssh-agent"
-                )
-                ;;
-        esac
-        
-        [ "$DEBUG_MODE" = false ] && echo "SSH agent forwarding enabled"
-    else
-        echo "Warning: SSH agent not available or not running"
-        echo "Git operations over SSH will not work. Start ssh-agent or use --no-ssh-agent to suppress this warning"
-    fi
-fi
-
 # Ensure .claude directory and .claude.json exist
 mkdir -p "$HOME/.claude" 2>/dev/null || true
 [ -f "$HOME/.claude.json" ] || echo "{}" > "$HOME/.claude.json"
@@ -472,29 +363,6 @@ DOCKER_OPTS+=(
     -v "$HOME/.claude:/home/ubuntu/.claude:rw"
     -v "$HOME/.claude.json:/home/ubuntu/.claude.json:rw"
 )
-
-# Create a temporary directory for SSH with proper permissions
-SSH_TEMP_DIR=$(mktemp -d -t claucker-ssh-XXXXXX)
-
-# Copy SSH config files to temp directory with correct permissions
-if [ -d "$HOME/.ssh" ]; then
-    # Create SSH directory structure with correct permissions
-    mkdir -p "$SSH_TEMP_DIR/.ssh"
-    chmod 700 "$SSH_TEMP_DIR/.ssh"
-    
-    # Copy config and known_hosts if they exist
-    if [ -f "$HOME/.ssh/config" ]; then
-        cp "$HOME/.ssh/config" "$SSH_TEMP_DIR/.ssh/config"
-        chmod 644 "$SSH_TEMP_DIR/.ssh/config"
-    fi
-    if [ -f "$HOME/.ssh/known_hosts" ]; then
-        cp "$HOME/.ssh/known_hosts" "$SSH_TEMP_DIR/.ssh/known_hosts"
-        chmod 644 "$SSH_TEMP_DIR/.ssh/known_hosts"
-    fi
-    
-    # Mount the prepared SSH directory
-    DOCKER_OPTS+=(-v "$SSH_TEMP_DIR/.ssh:/home/ubuntu/.ssh:rw")
-fi
 
 # Mount git config if it exists
 [ -f "$HOME/.gitconfig" ] && DOCKER_OPTS+=(-v "$HOME/.gitconfig:/home/ubuntu/.gitconfig:ro")
