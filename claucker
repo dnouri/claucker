@@ -53,6 +53,11 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     openssh-client \
     sudo \
+    libnotify-bin \
+    pulseaudio-utils \
+    sox \
+    libsox-fmt-all \
+    sound-theme-freedesktop \
     # Playwright dependencies for headless browsers (Ubuntu 24.04)
     libglib2.0-0t64 \
     libnss3 \
@@ -324,6 +329,28 @@ DOCKER_OPTS=(
 # Use host network on Linux (doesn't work properly on Mac/Windows anyway)
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     DOCKER_OPTS+=(--network host)
+
+    # Add D-Bus notification support for desktop notifications
+    # This allows notify-send in the container to show notifications on the host
+    if [ -S "/run/user/$(id -u)/bus" ]; then
+        DOCKER_OPTS+=(
+            -v "/run/user/$(id -u)/bus:/run/user/$(id -u)/bus"
+            -e "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus"
+        )
+    fi
+
+    # Add PulseAudio support for sound playback
+    # This allows playing sounds from the container on the host
+    if [ -S "/run/user/$(id -u)/pulse/native" ]; then
+        DOCKER_OPTS+=(
+            -v "/run/user/$(id -u)/pulse:/run/user/$(id -u)/pulse"
+            -e "PULSE_SERVER=unix:/run/user/$(id -u)/pulse/native"
+        )
+        # Also share PulseAudio cookie for authentication if it exists
+        if [ -f "$HOME/.config/pulse/cookie" ]; then
+            DOCKER_OPTS+=(-v "$HOME/.config/pulse/cookie:/home/ubuntu/.config/pulse/cookie:ro")
+        fi
+    fi
 fi
 
 # Pass API key

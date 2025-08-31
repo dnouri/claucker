@@ -68,6 +68,44 @@ CLAUCKER_API_KEY="sk-ant-..."  # Default API key (⚠️ security risk)
 
 Command-line arguments always override config file settings.
 
+### Notifications and Sound (Linux)
+
+On Linux systems, Claucker supports desktop notifications and sound
+playback through D-Bus and PulseAudio socket sharing. Configure Claude
+hooks in `~/.claude/settings.json` to get notified when tasks
+complete:
+
+```json
+{
+  "model": "opus",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(command -v notify-send >/dev/null 2>&1 && notify-send \"Claude Ready\" \"${CLAUDE_PROJECT_DIR}\" -t 5000 || true) && (command -v paplay >/dev/null 2>&1 && paplay /usr/share/sounds/freedesktop/stereo/complete.oga || true)"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(command -v notify-send >/dev/null 2>&1 && notify-send \"Claude Compacting\" \"${CLAUDE_PROJECT_DIR}\" -t 5000 || true) && (command -v paplay >/dev/null 2>&1 && paplay /usr/share/sounds/freedesktop/stereo/trash-empty.oga || true)"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This provides visual notifications and audio feedback when Claude is
+ready or compacts.
+
 ## Tools
 
 Development tools managed by [mise](https://mise.jdx.dev/). All tools available directly in PATH.
